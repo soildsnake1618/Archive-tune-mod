@@ -1,55 +1,116 @@
-name: Build ArchiveTune
+name: Build ArchiveTune 15.0.0 + Genius
 
 on:
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout workflow repo
         uses: actions/checkout@v4
 
-      - name: Set up JDK 17
-        uses: actions/setup-java@v6
+      - name: Set up JDK 21
+        uses: actions/setup-java@v5
         with:
+          java-version: '21'
           distribution: temurin
-          java-version: "17"
 
-      - name: Extract source
+      - name: Extract ArchiveTune source
         shell: bash
         run: |
+          set -euo pipefail
+          rm -rf source
           mkdir -p source
-          unzip -q "ArchiveTune-15.0.0-GeniusSynced.zip" -d source
-          echo "ZIP extracted"
-          find source -type f -name gradlew
+          unzip -q ArchiveTune-15.0.0-GeniusSynced.zip -d source
+          test -f source/ArchiveTune-15.0.0/gradlew
+          echo "PROJECT_DIR=source/ArchiveTune-15.0.0" >> "$GITHUB_ENV"
 
-      - name: Find Gradle project
+      - name: Restore pinned Git submodules
         shell: bash
         run: |
-          GRADLEW=$(find source -type f -name gradlew -print -quit)
+          set -euo pipefail
 
-          if [ -z "$GRADLEW" ]; then
-            echo "ERROR: gradlew not found"
-            exit 1
-          fi
+          cd "$PROJECT_DIR"
 
-          PROJECT_DIR=$(dirname "$GRADLEW")
-          echo "PROJECT_DIR=$PROJECT_DIR"
-          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          # The ZIP does not contain the Git submodule contents.
+          # These refs match the ArchiveTune 15.0.0 dependency state
+          # documented by the N20260911 nightly release.
+          clone_at() {
+            local url="$1"
+            local dir="$2"
+            local ref="$3"
+
+            rm -rf "$dir"
+            git clone --no-checkout "$url" "$dir"
+            git -C "$dir" checkout --detach "$ref"
+          }
+
+          clone_at \
+            https://github.com/rukamori/core.git \
+            core \
+            04672ef
+
+          clone_at \
+            https://github.com/rukamori/lyrics.git \
+            lyrics \
+            8c00f93
+
+          clone_at \
+            https://github.com/rukamori/morideobfuscator.git \
+            morideobfuscator \
+            2108e61
+
+          # IconPack was not listed as changed in the v15.0.0 nightly
+          # dependency updates; use the currently pinned upstream commit.
+          clone_at \
+            https://github.com/rukamori/IconPack.git \
+            IconPack \
+            c395ce7
+
+          echo "Submodule revisions:"
+          git -C core rev-parse HEAD
+          git -C lyrics rev-parse HEAD
+          git -C morideobfuscator rev-parse HEAD
+          git -C IconPack rev-parse HEAD
 
       - name: Grant execute permission
         run: chmod +x "$PROJECT_DIR/gradlew"
 
-      - name: Build APK
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-cleanup: on-success
+
+      - name: Build GMS Mobile ARM64 release
         shell: bash
         run: |
+          set -euo pipefail
           cd "$PROJECT_DIR"
-          ./gradlew assembleRelease
+
+          ./gradlew clean assembleGmsMobileArm64Release --stacktrace
+
+      - name: Verify APK output
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APK_DIR="$PROJECT_DIR/app/build/outputs/apk/gmsMobileArm64/release"
+
+          echo "APK files:"
+          find "$PROJECT_DIR/app/build/outputs/apk" -type f -name "*.apk" -print
+
+          test -d "$APK_DIR"
+          test -n "$(find "$APK_DIR" -type f -name "*.apk" -print -quit)"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: ArchiveTune-Genius
-          path: "**/build/outputs/apk/release/*.apk"
+          name: ArchiveTune-15.0.0-Genius-GMS-ARM64
+          path: source/ArchiveTune-15.0.0/app/build/outputs/apk/gmsMobileArm64/release/*.apk
+          if-no-files-found: error
+          retention-days: 30
