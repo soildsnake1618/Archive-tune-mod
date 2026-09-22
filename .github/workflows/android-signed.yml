@@ -1,0 +1,144 @@
+name: Build ArchiveTune 15.0.0 + Genius (Signed)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout workflow repo
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v5
+        with:
+          java-version: '21'
+          distribution: temurin
+
+      - name: Extract ArchiveTune source
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf source
+          mkdir -p source
+          unzip -q ArchiveTune-15.0.0-GeniusSynced.zip -d source
+          test -f source/ArchiveTune-15.0.0/gradlew
+          echo "PROJECT_DIR=source/ArchiveTune-15.0.0" >> "$GITHUB_ENV"
+
+      - name: Restore pinned Git submodules
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+
+          clone_at() {
+            local url="$1"
+            local dir="$2"
+            local ref="$3"
+
+            rm -rf "$dir"
+            git clone --no-checkout "$url" "$dir"
+            git -C "$dir" checkout --detach "$ref"
+          }
+
+          clone_at https://github.com/rukamori/core.git core 04672ef
+          clone_at https://github.com/rukamori/lyrics.git lyrics 8c00f93
+          clone_at https://github.com/rukamori/morideobfuscator.git morideobfuscator 2108e61
+          clone_at https://github.com/rukamori/IconPack.git IconPack c395ce7
+
+          echo "Pinned submodules:"
+          git -C core rev-parse HEAD
+          git -C lyrics rev-parse HEAD
+          git -C morideobfuscator rev-parse HEAD
+          git -C IconPack rev-parse HEAD
+
+      - name: Grant execute permission
+        run: chmod +x "$PROJECT_DIR/gradlew"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-cleanup: on-success
+
+      - name: Build unsigned ARM64 APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+          ./gradlew clean assembleGmsMobileArm64Release --stacktrace
+
+      - name: Create signing keystore
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          keytool -genkeypair \
+            -v \
+            -keystore "$RUNNER_TEMP/archivetune-mod.jks" \
+            -storetype PKCS12 \
+            -storepass "archivetune" \
+            -keypass "archivetune" \
+            -alias archivetune \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -dname "CN=ArchiveTune Genius Mod, OU=ArchiveTune, O=Local Build, L=Ca Mau, ST=Ca Mau, C=VN"
+
+      - name: Sign APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APK_DIR="$PROJECT_DIR/app/build/outputs/apk/gmsMobileArm64/release"
+          UNSIGNED="$APK_DIR/app-gms-mobile-arm64-release-unsigned.apk"
+          SIGNED="$APK_DIR/ArchiveTune-15.0.0-Genius-signed.apk"
+
+          test -f "$UNSIGNED"
+
+          # Android SDK build-tools are installed on the GitHub runner.
+          ZIPALIGN="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)/zipalign"
+          APKSIGNER="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)/apksigner"
+
+          "$ZIPALIGN" -f 4 "$UNSIGNED" "$APK_DIR/aligned.apk"
+
+          "$APKSIGNER" sign \
+            --ks "$RUNNER_TEMP/archivetune-mod.jks" \
+            --ks-pass pass:archivetune \
+            --key-pass pass:archivetune \
+            --ks-key-alias archivetune \
+            --out "$SIGNED" \
+            "$APK_DIR/aligned.apk"
+
+          "$APKSIGNER" verify --verbose "$SIGNED"
+
+          rm -f "$APK_DIR/aligned.apk"
+
+      - name: Verify final APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APK="$PROJECT_DIR/app/build/outputs/apk/gmsMobileArm64/release/ArchiveTune-15.0.0-Genius-signed.apk"
+
+          test -f "$APK"
+          test -s "$APK"
+
+          echo "Final APK:"
+          ls -lh "$APK"
+
+          echo "APK signature:"
+          APKSIGNER="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)/apksigner"
+          "$APKSIGNER" verify --verbose "$APK"
+
+      - name: Upload signed APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ArchiveTune-15.0.0-Genius-ARM64-SIGNED
+          path: source/ArchiveTune-15.0.0/app/build/outputs/apk/gmsMobileArm64/release/ArchiveTune-15.0.0-Genius-signed.apk
+          if-no-files-found: error
+          retention-days: 30
